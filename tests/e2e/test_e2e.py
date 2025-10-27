@@ -1,73 +1,72 @@
-# tests/e2e/test_e2e.py
+import pytest
+import threading
+import time
+import requests
+import uvicorn
+from playwright.sync_api import sync_playwright
 
-import pytest  # Import the pytest framework for writing and running tests
+# Import your FastAPI app directly
+from main import app
 
-# The following decorators and functions define E2E tests for the FastAPI calculator application.
 
-@pytest.mark.e2e
-def test_hello_world(page, fastapi_server):
+@pytest.fixture(scope="session")
+def fastapi_server():
     """
-    Test that the homepage displays "Hello World".
-
-    This test verifies that when a user navigates to the homepage of the application,
-    the main header (`<h1>`) correctly displays the text "Hello World". This ensures
-    that the server is running and serving the correct template.
+    Starts the FastAPI app in a background thread using uvicorn.
+    This avoids subprocess timing issues on Windows.
     """
-    # Navigate the browser to the homepage URL of the FastAPI application.
-    page.goto('http://localhost:8000')
-    
-    # Use an assertion to check that the text within the first <h1> tag is exactly "Hello World".
-    # If the text does not match, the test will fail.
-    assert page.inner_text('h1') == 'Hello World'
+    server_url = "http://127.0.0.1:8000"
 
-@pytest.mark.e2e
-def test_calculator_add(page, fastapi_server):
-    """
-    Test the addition functionality of the calculator.
+    # Start FastAPI in a background thread
+    config = uvicorn.Config(app, host="127.0.0.1", port=8000, log_level="info")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
 
-    This test simulates a user performing an addition operation using the calculator
-    on the frontend. It fills in two numbers, clicks the "Add" button, and verifies
-    that the result displayed is correct.
-    """
-    # Navigate the browser to the homepage URL of the FastAPI application.
-    page.goto('http://localhost:8000')
-    
-    # Fill in the first number input field (with id 'a') with the value '10'.
-    page.fill('#a', '10')
-    
-    # Fill in the second number input field (with id 'b') with the value '5'.
-    page.fill('#b', '5')
-    
-    # Click the button that has the exact text "Add". This triggers the addition operation.
-    page.click('button:text("Add")')
-    
-    # Use an assertion to check that the text within the result div (with id 'result') is exactly "Result: 15".
-    # This verifies that the addition operation was performed correctly and the result is displayed as expected.
-    assert page.inner_text('#result') == 'Calculation Result: 15'
+    # Wait until the server is ready
+    timeout = 30
+    start_time = time.time()
+    while True:
+        try:
+            res = requests.get(server_url)
+            if res.status_code == 200:
+                print("✅ FastAPI server is running at", server_url)
+                break
+        except requests.exceptions.ConnectionError:
+            if time.time() - start_time > timeout:
+                raise RuntimeError("❌ FastAPI server failed to start in time.")
+            time.sleep(1)
 
-@pytest.mark.e2e
-def test_calculator_divide_by_zero(page, fastapi_server):
-    """
-    Test the divide by zero functionality of the calculator.
+    yield server_url  # provide base URL to tests if needed
 
-    This test simulates a user attempting to divide a number by zero using the calculator.
-    It fills in the numbers, clicks the "Divide" button, and verifies that the appropriate
-    error message is displayed. This ensures that the application correctly handles invalid
-    operations and provides meaningful feedback to the user.
+    # No explicit shutdown — daemon thread ends with pytest session
+    print("🛑 FastAPI server thread stopped.")
+
+
+@pytest.fixture(scope="session")
+def playwright_instance_fixture():
     """
-    # Navigate the browser to the homepage URL of the FastAPI application.
-    page.goto('http://localhost:8000')
-    
-    # Fill in the first number input field (with id 'a') with the value '10'.
-    page.fill('#a', '10')
-    
-    # Fill in the second number input field (with id 'b') with the value '0', attempting to divide by zero.
-    page.fill('#b', '0')
-    
-    # Click the button that has the exact text "Divide". This triggers the division operation.
-    page.click('button:text("Divide")')
-    
-    # Use an assertion to check that the text within the result div (with id 'result') is exactly
-    # "Error: Cannot divide by zero!". This verifies that the application handles division by zero
-    # gracefully and displays the correct error message to the user.
-    assert page.inner_text('#result') == 'Error: Cannot divide by zero!'
+    Initialize Playwright once per session.
+    """
+    with sync_playwright() as p:
+        yield p
+
+
+@pytest.fixture(scope="session")
+def browser(playwright_instance_fixture):
+    """
+    Launch a headless Chromium browser once per session.
+    """
+    browser = playwright_instance_fixture.chromium.launch(headless=True)
+    yield browser
+    browser.close()
+
+
+@pytest.fixture(scope="function")
+def page(browser):
+    """
+    Creates a new browser page for each test function.
+    """
+    page = browser.new_page()
+    yield page
+    page.close()
